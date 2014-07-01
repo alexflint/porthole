@@ -9,7 +9,7 @@ import numpy as np
 import numdifftools
 
 import matplotlib
-matplotlib.use('Agg')
+matplotlib.use('Agg', warn=False)
 import matplotlib.pyplot as plt
 
 
@@ -56,6 +56,12 @@ class Rbm(object):
         w, bv, bh = pieces(x, nv*nh, nv, nh)
         return Rbm(np.reshape(w, (nv, nh)), bv, bh)
 
+    @classmethod
+    def zero(cls, nv, nh):
+        return Rbm(w=np.zeros((nv, nh)),
+                   bv=np.zeros(nv),
+                   bh=np.zeros(nh))
+
     def as_vector(self):
         return np.hstack((self.w.flatten(), self.bv, self.bh))
 
@@ -66,6 +72,26 @@ class Rbm(object):
         return 'Visible biases: %s\nHidden biases: %s\nWeights:\n%s' % \
               (self.bv, self.bh, self.w)
 
+
+def save_rbm(params, path):
+    with open(str(path), 'w') as fd:
+        fd.write('%d %d\n' % (params.visible_size, params.hidden_size))
+        fd.write(' '.join(map(str, params.bv.flatten())) + '\n')
+        fd.write(' '.join(map(str, params.bh.flatten())) + '\n')
+        fd.write(' '.join(map(str, params.w.flatten())) + '\n')
+
+
+def load_rbm(path):
+    with open(str(path)) as fd:
+        lines = list(fd)
+        assert len(lines) == 4
+        nv, nh = map(int, lines[0].split())
+        bv = map(float, lines[1].split())
+        bh = map(float, lines[2].split())
+        w = np.array(map(float, lines[3].split())).reshape((nv, nh))
+        assert len(bv) == nv
+        assert len(bh) == nh
+        return Rbm(w, bv, bh)
 
 
 def log_sum_exp(xs):
@@ -193,6 +219,73 @@ def random_rbm(nv, nh, stddev=.1):
     return Rbm(w, bv, bh)
 
 
+def cd_gradient(rbm, v):
+    v = np.asarray(v, dtype=float)
+    gradient = Rbm.zero(rbm.visible_size, rbm.hidden_size)
+    gradient.bv[:] = v
+    gradient.bh[:] = hidden_conditionals(rbm, v)
+    gradient.w = np.outer(v, hidden_conditionals(rbm, v))
+    return gradient
+
+
+def train_rbm(dataset,
+              learning_rate,
+              num_steps,
+              seed,
+              num_gibbs_steps=1):
+    """Implements vanilla contrastive divergence."""
+    nv = seed.visible_size
+    nh = seed.hidden_size
+    cur_params = seed.copy()
+    dataset = np.asarray(dataset)
+    for step in range(num_steps):
+        print 'Step %d' % step
+        gradient = Rbm.zero(cur_params.visible_size, cur_params.hidden_size)
+        for item in dataset:
+            vpos = vneg = item
+            for gibbs_step in range(num_gibbs_steps):
+                hneg = sample_hidden(cur_params, vneg)
+                vneg = sample_visible(cur_params, hneg)
+
+            print '  Positive: %s' % bitstring(vpos)
+            print '  Negative: %s' % bitstring(vneg)
+
+            pos_gradient = cd_gradient(cur_params, vpos)
+            neg_gradient = cd_gradient(cur_params, vneg)
+            gradient.bv += pos_gradient.bv - neg_gradient.bv
+            gradient.bh += pos_gradient.bh - neg_gradient.bh
+            gradient.w += pos_gradient.w - neg_gradient.w
+
+
+        #G_true = gradient_naive(cur_params, data)
+        #print 'CD gradient:'
+        #print G
+        #print 'True gradient:'
+        #print G_true
+        ##G = G_true
+
+        cur_params.w += gradient.w * learning_rate
+        cur_params.bv += gradient.bv * learning_rate
+        cur_params.bh += gradient.bh * learning_rate
+
+        #loglik = loglikelihood_naive(cur_params, data)
+        #print '  Log likelihood: %.2f' % loglik
+        #loglikelihoods.append(loglik)
+
+    return cur_params
+
+
+def compute_compression_error(rbm, dataset):
+    sum_mse = 0
+    for item in dataset:
+        compressed = hidden_conditionals(rbm, item)
+        uncompressed = visible_conditionals(rbm, compressed)
+        print 'uncompressed:',uncompressed
+        mse = np.sum(np.square(uncompressed - item.astype(float))) / np.prod(np.shape(item))
+        sum_mse += mse
+    return sum_mse / len(dataset)
+
+
 class RbmTest(unittest.TestCase):
     def setUp(self):
         self.nv = 3
@@ -311,71 +404,45 @@ def main():
 
 
     def run_contrastive_divergence():
-        nv = 3
-        nh = 2
+        data = np.array([[1, 0, 0, 0],
+                         [0, 0, 0, 1]])
+        nv = data.shape[1]
+        nh = 1
         seed_params = random_rbm(nv, nh)
-        data = np.random.randint(0, 2, nv)
 
         print_table(seed_params)
+        learned_params = train_rbm(data, learning_rate=.1, num_steps=10000, seed=seed_params)
+        print_table(learned_params)
 
-        loglikelihoods = []
-        learning_rate = .1
+        save_rbm(learned_params, 'rbms/2x4.txt')
 
-        cur_params = seed_params.copy()
-        num_gibbs_steps = 1
-        num_steps = 100
-        for step in range(num_steps):
-            print 'Step %d' % step
-            vpos = data.copy()
-            vneg = data.copy()
-            for gibbs_step in range(num_gibbs_steps):
-                hneg = sample_hidden(cur_params, vneg)
-                vneg = sample_visible(cur_params, hneg)
-            print '  Positive: %s' % bitstring(vpos)
-            print '  Negative: %s' % bitstring(vneg)
-            G = Rbm(np.zeros_like(cur_params.w),
-                    np.zeros_like(cur_params.bv),
-                    np.zeros_like(cur_params.bh))
-            for i in range(nv):
-                G.bv[i] += int(vpos[i]) - int(vneg[i])
-            for j in range(nh):
-                ppos = hidden_conditional(cur_params, vpos, j)
-                pneg = hidden_conditional(cur_params, vneg, j)
-                G.bh[j] += ppos - pneg
-            for i in range(nv):
-                for j in range(nh):
-                    ppos = hidden_conditional(cur_params, vpos, j) * vpos[i]
-                    pneg = hidden_conditional(cur_params, vneg, j) * vneg[i]
-                    G.w[i, j] += ppos - pneg
 
-            #G_true = gradient_naive(cur_params, data)
-            #print 'CD gradient:'
-            #print G
-            #print 'True gradient:'
-            #print G_true
-            ##G = G_true
+    def run_contrastive_divergence2():
+        data = np.array([[1, 0, 0, 0],
+                         [0, 0, 0, 1]])
+        nv = data.shape[1]
+        nh = 1
+        seed_params = random_rbm(nv, nh)
 
-            next_params = cur_params.copy()
-            next_params.w += G.w * learning_rate
-            next_params.bv += G.bv * learning_rate
-            next_params.bh += G.bh * learning_rate
+        print_table(seed_params)
+        learned_params = train_rbm(data, learning_rate=.1, num_steps=10, seed=seed_params)
+        print_table(learned_params)
+        print compute_compression_error(learned_params, data)
 
-            cur_params = next_params
 
-            loglik = loglikelihood_naive(cur_params, data)
-            print '  Log likelihood: %.2f' % loglik
+    def run_compression():
+        data = np.array([[1, 0, 0, 0],
+                         [0, 0, 0, 1]])
+        rbm = load_rbm('rbms/2x4.txt')
+        mse = compute_compression_error(rbm, data)
+        print 'Mean squared error: %.2f%%' % (mse * 100.)
 
-            loglikelihoods.append(loglik)
-
-        print_table(cur_params)
-
-        plt.clf()
-        plt.plot(loglikelihoods)
-        plt.savefig('out/loglikelihoods.pdf')
 
     #run_gradient()
     #run_training()
-    run_contrastive_divergence()
+    #run_contrastive_divergence()
+    run_contrastive_divergence2()
+    #run_compression()
 
 
 if __name__ == '__main__':
