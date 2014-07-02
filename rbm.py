@@ -422,7 +422,6 @@ def main():
         print 'Log likelihood of data:', sum_loglikelihood_naive(opt_params, vs)
         print_table(opt_params)
 
-
     def run_gradient():
         nv = 3
         nh = 2
@@ -450,7 +449,6 @@ def main():
         print 'Numerical gradient of hidden biases:'
         print G_numeric.bh
 
-
     def run_contrastive_divergence():
         data = np.array([[1, 0, 0, 0],
                          [0, 0, 0, 1]])
@@ -464,7 +462,6 @@ def main():
 
         save_rbm(learned_params, 'rbms/2x4.txt')
 
-
     def run_contrastive_divergence2():
         data = np.array([[1, 0, 0, 0],
                          [0, 0, 0, 1]])
@@ -477,35 +474,6 @@ def main():
         print_table(learned_params)
         print compute_compression_error(learned_params, data)
 
-
-    def run_contrastive_divergence3():
-        data = []
-        #data.append(np.zeros(100))
-        #data.append(np.ones(100))
-        #data.append([i%2 for i in range(100)])
-        #data.append([(i+1)%2 for i in range(100)])
-        for i in range(100):
-            canvas = np.zeros((10,10))
-            center = np.random.randint(3, 7, size=2)
-            for ii in range(10):
-                for jj in range(10):
-                    if np.linalg.norm(center - (ii,jj)) < 3:
-                        canvas[ii,jj] = 1
-            data.append(canvas.flatten())
-
-        nv = len(data[0])
-        nh = 100
-        seed = random_rbm(nv, nh, stddev=.01)
-        rbm = train_rbm(data, learning_rate=.01, weight_decay=1e-4, num_steps=1000, seed=seed)
-
-        save_rbm(rbm, 'rbms/blocks.txt')
-
-        plot_reconstructions(rbm, data[:10], shape=(10,10), out='out/reconstructions.pdf')
-
-        mse = compute_compression_error(rbm, data)
-        print 'Mean squared error: %.2f%%' % (mse * 100.)
-
-
     def run_compression():
         data = np.array([[1, 0, 0, 0],
                          [0, 0, 0, 1]])
@@ -513,13 +481,66 @@ def main():
         mse = compute_compression_error(rbm, data)
         print 'Mean squared error: %.2f%%' % (mse * 100.)
 
+    def make_block_image(center, radius, shape):
+        center = np.asarray(center)
+        image = np.zeros(shape)
+        for i in range(shape[0]):
+            for j in range(shape[1]):
+                if np.linalg.norm(center - (i,j)) < radius:
+                    image[i,j] = 1
+        return image
+
+    def make_blocks_data():
+        dataset = []
+        #data.append(np.zeros(100))
+        #data.append(np.ones(100))
+        #data.append([i%2 for i in range(100)])
+        #data.append([(i+1)%2 for i in range(100)])
+        for i in range(100):
+            center = np.random.randint(3, 7, size=2)
+            image = make_block_image(center, 3, (10,10))
+            dataset.append(image.flatten())
+        return dataset
+
+    def run_train_blocks():
+        data = make_blocks_data()
+        nv = len(data[0])
+        nh = 50
+        seed = random_rbm(nv, nh, stddev=1e-2)
+
+        rbm = train_rbm(data, learning_rate=.01, weight_decay=1e-4, num_steps=1000, seed=seed)
+        #rbm = train_rbm(data, learning_rate=.001, weight_decay=1e-4, num_steps=1000, seed=rbm)
+
+        save_rbm(rbm, 'rbms/blocks.txt')
+
+        mse = compute_compression_error(rbm, data)
+        print 'Mean squared error: %.2f%%' % (mse * 100.)
+
+        plot_reconstructions(rbm, data[:10], shape=(10,10), out='out/reconstructions.pdf')
+
+    def run_plot_reconstructions():
+        data = make_blocks_data()
+        rbm = load_rbm('rbms/blocks.txt')
+        plot_reconstructions(rbm, data, shape=(10,10), out='out/reconstructions.pdf')
+
+    def run_plot_novel_blocks():
+        images = []
+        for i in range(-1, 12, 2):
+            for j in range(-1, 12, 2):
+                images.append(make_block_image((i,j), 3, (10,10)).flatten())
+
+        rbm = load_rbm('rbms/blocks.txt')
+        plot_reconstructions(rbm, images, shape=(10,10), out='out/novel_reconstruction.pdf')
+
 
     #run_gradient()
     #run_training()
+    #run_compression()
     #run_contrastive_divergence()
     #run_contrastive_divergence2()
-    run_contrastive_divergence3()
-    #run_compression()
+    run_train_blocks()
+    #run_plot_reconstructions()
+    #run_plot_novel_blocks()
 
 
 if __name__ == '__main__':
