@@ -11,6 +11,7 @@ import numdifftools
 import matplotlib
 matplotlib.use('Agg', warn=False)
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages as PdfPages
 
 
 def chop(x, i):
@@ -221,10 +222,11 @@ def random_rbm(nv, nh, stddev=.1):
 
 def cd_gradient(rbm, v):
     v = np.asarray(v, dtype=float)
+    h = hidden_conditionals(rbm, v)
     gradient = Rbm.zero(rbm.visible_size, rbm.hidden_size)
     gradient.bv[:] = v
-    gradient.bh[:] = hidden_conditionals(rbm, v)
-    gradient.w = np.outer(v, hidden_conditionals(rbm, v))
+    gradient.bh[:] = h
+    gradient.w = np.outer(v, h)
     return gradient
 
 
@@ -232,23 +234,30 @@ def train_rbm(dataset,
               learning_rate,
               num_steps,
               seed,
-              num_gibbs_steps=1):
+              num_gibbs_steps=1,
+              weight_decay=0):
     """Implements vanilla contrastive divergence."""
     nv = seed.visible_size
     nh = seed.hidden_size
     cur_params = seed.copy()
     dataset = np.asarray(dataset)
+    last_progress = None
     for step in range(num_steps):
-        print 'Step %d' % step
+        progress = int(round(100. * step / num_steps))
+        if progress != last_progress:
+            print 'Training %d%% complete (step %d of %d)' % (progress, step, num_steps)
+            last_progress = progress
+
         gradient = Rbm.zero(cur_params.visible_size, cur_params.hidden_size)
+
         for item in dataset:
             vpos = vneg = item
             for gibbs_step in range(num_gibbs_steps):
                 hneg = sample_hidden(cur_params, vneg)
                 vneg = sample_visible(cur_params, hneg)
 
-            print '  Positive: %s' % bitstring(vpos)
-            print '  Negative: %s' % bitstring(vneg)
+            #print '  Positive: %s' % bitstring(vpos)
+            #print '  Negative: %s' % bitstring(vneg)
 
             pos_gradient = cd_gradient(cur_params, vpos)
             neg_gradient = cd_gradient(cur_params, vneg)
@@ -256,6 +265,16 @@ def train_rbm(dataset,
             gradient.bh += pos_gradient.bh - neg_gradient.bh
             gradient.w += pos_gradient.w - neg_gradient.w
 
+        # Normalize for dataset size
+        gradient.bv /= len(dataset)
+        gradient.bh /= len(dataset)
+        gradient.w /= len(dataset)
+
+        # Add weight decay term
+        if weight_decay != 0:
+            gradient.bv -= weight_decay * cur_params.bv
+            gradient.bh -= weight_decay * cur_params.bh
+            gradient.w -= weight_decay * cur_params.w
 
         #G_true = gradient_naive(cur_params, data)
         #print 'CD gradient:'
@@ -278,12 +297,41 @@ def train_rbm(dataset,
 def compute_compression_error(rbm, dataset):
     sum_mse = 0
     for item in dataset:
+        item = np.asarray(item, float)
         compressed = hidden_conditionals(rbm, item)
-        uncompressed = visible_conditionals(rbm, compressed)
-        print 'uncompressed:',uncompressed
-        mse = np.sum(np.square(uncompressed - item.astype(float))) / np.prod(np.shape(item))
+        reconstructed = visible_conditionals(rbm, compressed)
+        mse = np.sum(np.square(reconstructed - item)) / np.prod(np.shape(item))
         sum_mse += mse
     return sum_mse / len(dataset)
+
+
+def plot_reconstructions(rbm, dataset, out, shape=None):
+    pdf = PdfPages(out)
+    for item in dataset:
+        item = np.asarray(item, dtype=float)
+        compressed = hidden_conditionals(rbm, item)
+        recon = visible_conditionals(rbm, compressed)
+
+        plt.clf()
+
+        if shape is not None:
+            item = np.reshape(item, shape)
+            recon = np.reshape(recon, shape)
+        if item.ndim == 1:
+            item = np.atleast_2d(item).T
+            recon = np.atleast_2d(recon).T
+
+        plt.subplot(121)
+        plt.imshow(item, vmin=0., vmax=1., interpolation='nearest', cmap='summer')
+        plt.axis('equal')
+
+        plt.subplot(122)
+        plt.imshow(recon, vmin=0., vmax=1., interpolation='nearest', cmap='summer')
+        plt.axis('equal')
+
+        pdf.savefig()
+
+    pdf.close()
 
 
 class RbmTest(unittest.TestCase):
@@ -430,6 +478,34 @@ def main():
         print compute_compression_error(learned_params, data)
 
 
+    def run_contrastive_divergence3():
+        data = []
+        #data.append(np.zeros(100))
+        #data.append(np.ones(100))
+        #data.append([i%2 for i in range(100)])
+        #data.append([(i+1)%2 for i in range(100)])
+        for i in range(100):
+            canvas = np.zeros((10,10))
+            center = np.random.randint(3, 7, size=2)
+            for ii in range(10):
+                for jj in range(10):
+                    if np.linalg.norm(center - (ii,jj)) < 3:
+                        canvas[ii,jj] = 1
+            data.append(canvas.flatten())
+
+        nv = len(data[0])
+        nh = 100
+        seed = random_rbm(nv, nh, stddev=.01)
+        rbm = train_rbm(data, learning_rate=.01, weight_decay=1e-4, num_steps=1000, seed=seed)
+
+        save_rbm(rbm, 'rbms/blocks.txt')
+
+        plot_reconstructions(rbm, data[:10], shape=(10,10), out='out/reconstructions.pdf')
+
+        mse = compute_compression_error(rbm, data)
+        print 'Mean squared error: %.2f%%' % (mse * 100.)
+
+
     def run_compression():
         data = np.array([[1, 0, 0, 0],
                          [0, 0, 0, 1]])
@@ -441,7 +517,8 @@ def main():
     #run_gradient()
     #run_training()
     #run_contrastive_divergence()
-    run_contrastive_divergence2()
+    #run_contrastive_divergence2()
+    run_contrastive_divergence3()
     #run_compression()
 
 
