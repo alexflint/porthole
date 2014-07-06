@@ -4,9 +4,10 @@ import math
 import itertools
 import unittest
 
-import scipy.optimize
 import numpy as np
 import numdifftools
+import scipy.optimize
+import scipy.signal
 
 import matplotlib
 matplotlib.use('Agg', warn=False)
@@ -49,7 +50,15 @@ def sigmoid(x):
 
 
 def bit_product(n):
-    return itertools.product((0,1), repeat=n)
+    if np.isscalar(n):
+        return itertools.product((0,1), repeat=int(n))
+    else:
+        return (np.reshape(x, n)
+                for x in itertools.product((0,1), repeat=np.prod(n)))
+
+
+def boxrange(shape):
+    return itertools.product(*map(xrange, shape))
 
 
 class Rbm(object):
@@ -101,7 +110,7 @@ class Rbm(object):
 
     def hidden_conditional_naive(self, v, hi):
         energies = [[], []]
-        for h in itertools.product((0,1), repeat=self.hidden_size):
+        for h in bit_product(self.hidden_size):
             energies[h[hi]].append(self.energy(v, h))
         logp0 = log_sum_exp(np.negative(energies[0]))
         logp1 = log_sum_exp(np.negative(energies[1]))
@@ -150,6 +159,124 @@ class Rbm(object):
     def likelihood_naive(self, v):
         return math.exp(self.loglikelihood_naive(v))
 
+
+    def print_table(self):
+        for v in bit_product(self.visible_size):
+            L = self.loglikelihood_naive(v)
+            print '  %s: %.2f' % (bitstring(v), math.exp(L))
+
+
+class ConvolutionalRbm(object):
+    def __init__(self, w, bv, bh, vshape):
+        self.w = np.asarray(w)
+        self.bv = np.squeeze(np.asarray(bv))
+        self.bh = np.asarray(bh)
+
+        assert len(vshape) == 2
+        assert self.w.shape[1] % 2 == 1
+        assert self.w.shape[2] % 2 == 1
+        self.vshape = vshape
+        self.hshape = (self.w.shape[0],
+                       vshape[0] - self.w.shape[1] + 1,
+                       vshape[1] - self.w.shape[2] + 1)
+
+        assert np.ndim(self.w) == 3
+        assert np.ndim(self.bh) == 1
+        assert np.ndim(self.bv) == 0
+        assert len(self.w) == len(self.bh)
+
+    @property
+    def visible_shape(self):
+        return self.vshape
+
+    @property
+    def hidden_shape(self):
+        return self.hshape
+
+    @property
+    def state_size(self):
+        return len(self.bv) + len(self.bh)
+
+    @classmethod
+    def from_vector(cls, x, vshape, wshape):
+        w, bv, bh = pieces(x, np.prod(wshape), 1, wshape[0])
+        return Rbm(np.reshape(w, wshape), bv, bh)
+
+    @classmethod
+    def zero(cls, vshape, wshape):
+        return Rbm(w=np.zeros(wshape),
+                   bv=0.,
+                   bh=np.zeros(wshape[0]))
+
+    def as_vector(self):
+        return np.hstack((self.w.flatten(), self.bv, self.bh))
+
+    def copy(self):
+        return Rbm(self.w.copy(), self.bv.copy(), self.bh.copy())
+
+    def __str__(self):
+        return 'Visible biases: %s\nHidden biases: %s\nWeights:\n%s' % \
+               (self.bv, self.bh, self.w.flatten())
+
+    def forwards_convolve(self, v):
+        # Note that flipping k below is the analogue to transposing w in the pure RBM case
+        return np.array([scipy.signal.convolve2d(v, k[::-1,::-1], 'valid')
+                        for k in self.w])
+
+    def backwards_convolve(self, v):
+        return np.array([scipy.signal.convolve2d(v, k, 'valid') for k in self.w])
+
+    def hidden_conditional_naive(self, v, hi):
+        energies = [[], []]
+        for h in bit_product(self.hshape):
+            energies[h[hi]].append(self.energy(v, h))
+        logp0 = log_sum_exp(np.negative(energies[0]))
+        logp1 = log_sum_exp(np.negative(energies[1]))
+        return sigmoid(logp1 - logp0)
+
+    def hidden_conditionals_naive(self, v):
+        h = np.empty(self.hshape)
+        for i in range(h.shape[0]):
+            for j in range(h.shape[1]):
+                for k in range(h.shape[2]):
+                    h[i, j, k] = self.hidden_conditional_naive(v, (i, j, k))
+        return h
+
+    def hidden_conditionals(self, v):
+        return sigmoid(self.forwards_convolve(v) + self.bh[:, np.newaxis, np.newaxis])
+
+    ### NOT IMPLEMENTED:
+
+    def visible_conditionals(self, h):
+        return sigmoid(np.dot(self.w, h) + self.bv)
+
+    def sample_visible(self, h):
+        return np.random.rand(self.visible_size) < self.visible_conditionals(h)
+
+    def sample_hidden(self, v):
+        return np.random.rand(self.hidden_size) < self.hidden_conditionals(v)
+
+    def energy(self, v, h):
+        ew = -np.sum(h * self.forwards_convolve(v))
+        ev = -np.sum(v) * self.bv
+        eh = -np.sum(h * self.bh[:, np.newaxis, np.newaxis])
+        return ew + ev + eh
+
+    def loglikelihood_naive(self, v):
+        cond_energies = []
+        for h in bit_product(self.hidden_size):
+            cond_energies.append(self.energy(v, h))
+        joint_energies = []
+        for x in bit_product(self.state_size):
+            v, h = chop(x, self.visible_size)
+            joint_energies.append(self.energy(v, h))
+        return log_sum_neg_exp(cond_energies) - log_sum_neg_exp(joint_energies)
+
+    def sum_loglikelihood_naive(self, vs):
+        return sum(self.loglikelihood_naive(v) for v in vs)
+
+    def likelihood_naive(self, v):
+        return math.exp(self.loglikelihood_naive(v))
 
     def print_table(self):
         for v in bit_product(self.visible_size):
@@ -366,6 +493,7 @@ def plot_features(rbm, dataset, out, shape=None, features_shape=None):
 
 class RbmTest(unittest.TestCase):
     def setUp(self):
+        np.random.seed(124)
         self.nv = 3
         self.nh = 2
         w = np.random.normal(loc=0, scale=.1, size=(self.nv, self.nh))
@@ -410,6 +538,24 @@ class RbmTest(unittest.TestCase):
         np.testing.assert_array_almost_equal(G.w, G_numeric.w)
         np.testing.assert_array_almost_equal(G.bv, G_numeric.bv)
         np.testing.assert_array_almost_equal(G.bh, G_numeric.bh)
+
+
+class ConvolutionalRbmTest(unittest.TestCase):
+    def setUp(self):
+        np.random.seed(124)
+        vshape = (4, 1)
+        wshape = (2, 3, 1)
+        w = np.random.normal(loc=0, scale=.1, size=wshape)
+        bv = np.random.normal(loc=0, scale=.1, size=1)
+        bh = np.random.normal(loc=0, scale=.1, size=wshape[0])
+        self.crbm = ConvolutionalRbm(w, bv, bh, vshape)
+        self.v = np.random.randint(0, 2, self.crbm.vshape)
+        self.h = np.random.randint(0, 2, self.crbm.hshape)
+
+    def test_hidden_conditionals(self):
+        c1 = self.crbm.hidden_conditionals_naive(self.v)
+        c2 = self.crbm.hidden_conditionals(self.v)
+        np.testing.assert_array_almost_equal(c1, c2)
 
 
 def main():
