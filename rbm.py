@@ -25,12 +25,31 @@ def pieces(x, *sizes):
         yield x[sum:sum+size]
         sum += size
 
+
 def bitstring(x):
     return ''.join(map(str, map(int, x)))
 
 
 def rbm_str(v, h):
     return 'RBM(v=%s,h=%s)' % (bitstring(v), bitstring(h))
+
+
+def log_sum_exp(xs):
+    xs = np.asarray(xs)
+    m = np.max(xs)
+    return math.log(np.sum(np.exp(xs - m))) + m
+
+
+def log_sum_neg_exp(xs):
+    return log_sum_exp(np.negative(xs))
+
+
+def sigmoid(x):
+    return np.reciprocal(1 + np.exp(-x))
+
+
+def bit_product(n):
+    return itertools.product((0,1), repeat=n)
 
 
 class Rbm(object):
@@ -73,13 +92,77 @@ class Rbm(object):
         return 'Visible biases: %s\nHidden biases: %s\nWeights:\n%s' % \
               (self.bv, self.bh, self.w)
 
+    def energy(self, v, h):
+        ew = -np.dot(v, np.dot(self.w, h))
+        ev = -np.dot(self.bv, v)
+        eh = -np.dot(self.bh, h)
+        return ew + ev + eh
 
-def save_rbm(params, path):
+
+    def hidden_conditional_naive(self, v, hi):
+        energies = [[], []]
+        for h in itertools.product((0,1), repeat=self.hidden_size):
+            energies[h[hi]].append(self.energy(v, h))
+        logp0 = log_sum_exp(np.negative(energies[0]))
+        logp1 = log_sum_exp(np.negative(energies[1]))
+        return sigmoid(logp1 - logp0)
+
+
+    def hidden_conditional(self, v, hi):
+        return sigmoid(np.dot(self.w[:, hi], v) + self.bh[hi])
+
+
+    def hidden_conditionals(self, v):
+        return sigmoid(np.dot(self.w.T, v) + self.bh)
+
+
+    def visible_conditional(self, h, vi):
+        return sigmoid(np.dot(self.w[vi, :], h) + self.bv[vi])
+
+
+    def visible_conditionals(self, h):
+        return sigmoid(np.dot(self.w, h) + self.bv)
+
+
+    def sample_visible(self, h):
+        return np.random.rand(self.visible_size) < self.visible_conditionals(h)
+
+
+    def sample_hidden(self, v):
+        return np.random.rand(self.hidden_size) < self.hidden_conditionals(v)
+
+
+    def loglikelihood_naive(self, v):
+        cond_energies = []
+        for h in bit_product(self.hidden_size):
+            cond_energies.append(self.energy(v, h))
+        joint_energies = []
+        for x in bit_product(self.state_size):
+            v, h = chop(x, self.visible_size)
+            joint_energies.append(self.energy(v, h))
+        return log_sum_neg_exp(cond_energies) - log_sum_neg_exp(joint_energies)
+
+
+    def sum_loglikelihood_naive(self, vs):
+        return sum(self.loglikelihood_naive(v) for v in vs)
+
+
+    def likelihood_naive(self, v):
+        return math.exp(self.loglikelihood_naive(v))
+
+
+    def print_table(self):
+        for v in bit_product(self.visible_size):
+            L = self.loglikelihood_naive(v)
+            print '  %s: %.2f' % (bitstring(v), math.exp(L))
+
+
+def save_rbm(rbm, path):
     with open(str(path), 'w') as fd:
-        fd.write('%d %d\n' % (params.visible_size, params.hidden_size))
-        fd.write(' '.join(map(str, params.bv.flatten())) + '\n')
-        fd.write(' '.join(map(str, params.bh.flatten())) + '\n')
-        fd.write(' '.join(map(str, params.w.flatten())) + '\n')
+        fd.write('%d %d\n' % (rbm.visible_size, rbm.hidden_size))
+        fd.write(' '.join(map(str, rbm.bv.flatten())) + '\n')
+        fd.write(' '.join(map(str, rbm.bh.flatten())) + '\n')
+        fd.write(' '.join(map(str, rbm.w.flatten())) + '\n')
 
 
 def load_rbm(path):
@@ -95,122 +178,38 @@ def load_rbm(path):
         return Rbm(w, bv, bh)
 
 
-def log_sum_exp(xs):
-    xs = np.asarray(xs)
-    m = np.max(xs)
-    return math.log(np.sum(np.exp(xs - m))) + m
-
-
-def log_sum_neg_exp(xs):
-    return log_sum_exp(np.negative(xs))
-
-
-def sigmoid(x):
-    return np.reciprocal(1 + np.exp(-x))
-
-
-def bit_product(n):
-    return itertools.product((0,1), repeat=n)
-
-
-def energy(v, h, params):
-    ew = -np.dot(v, np.dot(params.w, h))
-    ev = -np.dot(params.bv, v)
-    eh = -np.dot(params.bh, h)
-    return ew + ev + eh
-
-
-def hidden_conditional_naive(params, v, hi):
-    energies = [[], []]
-    for h in itertools.product((0,1), repeat=params.hidden_size):
-        energies[h[hi]].append(energy(v, h, params))
-    logp0 = log_sum_exp(np.negative(energies[0]))
-    logp1 = log_sum_exp(np.negative(energies[1]))
-    return sigmoid(logp1 - logp0)
-
-
-def hidden_conditional(params, v, hi):
-    return sigmoid(np.dot(params.w[:, hi], v) + params.bh[hi])
-
-
-def hidden_conditionals(params, v):
-    return sigmoid(np.dot(params.w.T, v) + params.bh)
-
-
-def visible_conditional(params, h, vi):
-    return sigmoid(np.dot(params.w[vi, :], h) + params.bv[vi])
-
-
-def visible_conditionals(params, h):
-    return sigmoid(np.dot(params.w, h) + params.bv)
-
-
-def sample_visible(params, h):
-    return np.random.rand(params.visible_size) < visible_conditionals(params, h)
-
-
-def sample_hidden(params, v):
-    return np.random.rand(params.hidden_size) < hidden_conditionals(params, v)
-
-
-def loglikelihood_naive(params, v):
-    cond_energies = []
-    for h in bit_product(params.hidden_size):
-        cond_energies.append(energy(v, h, params))
-    joint_energies = []
-    for x in bit_product(params.state_size):
-        v, h = chop(x, params.visible_size)
-        joint_energies.append(energy(v, h, params))
-    return log_sum_neg_exp(cond_energies) - log_sum_neg_exp(joint_energies)
-
-
-def sum_loglikelihood_naive(params, vs):
-    return sum(loglikelihood_naive(params, v) for v in vs)
-
-
-def likelihood_naive(params, v):
-    return math.exp(loglikelihood_naive(params, v))
-
-
-def print_table(params):
-    for v in bit_product(params.visible_size):
-        L = loglikelihood_naive(params, v)
-        print '  %s: %.2f' % (bitstring(v), np.exp(L))
-
-
-def weight_gradient_naive(params, v0):
-    G = np.zeros((params.visible_size, params.hidden_size))
-    for i in range(params.hidden_size):
-        G[:, i] += hidden_conditional(params, v0, i) * v0
-    for v in bit_product(params.visible_size):
+def weight_gradient_naive(rbm, v0):
+    G = np.zeros((rbm.visible_size, rbm.hidden_size))
+    for i in range(rbm.hidden_size):
+        G[:, i] += rbm.hidden_conditional(v0, i) * v0
+    for v in bit_product(rbm.visible_size):
         # TODO: avoid underflow here by using log_sum_exp appropriately
-        lik = likelihood_naive(params, v)
-        condps = [hidden_conditional(params, v, i)
-                  for i in range(params.hidden_size)]
+        lik = rbm.likelihood_naive(v)
+        condps = rbm.hidden_conditionals(v)
         G -= lik * np.outer(v, condps)
     return G
 
 
-def visible_bias_gradient_naive(params, v0):
+def visible_bias_gradient_naive(rbm, v0):
     G = np.asarray(v0).astype(float).copy()
-    for v in bit_product(params.visible_size):
+    for v in bit_product(rbm.visible_size):
         # TODO: avoid underflow here by using log_sum_exp appropriately
-        G -= likelihood_naive(params, v) * np.asarray(v).astype(float)
+        G -= rbm.likelihood_naive(v) * np.asarray(v).astype(float)
     return G
 
 
-def hidden_bias_gradient_naive(params, v0):
-    G = hidden_conditionals(params, v0)
-    for v in bit_product(params.visible_size):
+def hidden_bias_gradient_naive(rbm, v0):
+    G = rbm.hidden_conditionals(v0)
+    for v in bit_product(rbm.visible_size):
         # TODO: avoid underflow here by using log_sum_exp appropriately
-        G -= likelihood_naive(params, v) * np.asarray(hidden_conditionals(params, v))
+        G -= rbm.likelihood_naive(v) * np.asarray(rbm.hidden_conditionals(v))
     return G
 
 
-def gradient_naive(params, v0):
-    return Rbm(weight_gradient_naive(params, v0),
-               visible_bias_gradient_naive(params, v0),
-               hidden_bias_gradient_naive(params, v0))
+def gradient_naive(rbm, v0):
+    return Rbm(weight_gradient_naive(rbm, v0),
+               visible_bias_gradient_naive(rbm, v0),
+               hidden_bias_gradient_naive(rbm, v0))
 
 
 def random_rbm(nv, nh, stddev=.1):
@@ -220,9 +219,10 @@ def random_rbm(nv, nh, stddev=.1):
     return Rbm(w, bv, bh)
 
 
-def cd_gradient(rbm, v):
+def free_energy_gradient(rbm, v):
     v = np.asarray(v, dtype=float)
-    h = hidden_conditionals(rbm, v)
+    h = rbm.hidden_conditionals(v)
+    #return Rbm(v, h, np.outer(v, h))
     gradient = Rbm.zero(rbm.visible_size, rbm.hidden_size)
     gradient.bv[:] = v
     gradient.bh[:] = h
@@ -235,32 +235,31 @@ def train_rbm(dataset,
               num_steps,
               seed,
               num_gibbs_steps=1,
-              weight_decay=0):
+              weight_decay=0.):
     """Implements vanilla contrastive divergence."""
-    nv = seed.visible_size
-    nh = seed.hidden_size
-    cur_params = seed.copy()
+    cur = seed.copy()
     dataset = np.asarray(dataset)
     last_progress = None
     for step in range(num_steps):
-        progress = int(round(100. * step / num_steps))
-        if progress != last_progress:
-            print 'Training %d%% complete (step %d of %d)' % (progress, step, num_steps)
-            last_progress = progress
+        if num_steps > 1:
+            progress = int(100. * step / num_steps)
+            if progress != last_progress:
+                print 'Training %d%% complete (step %d of %d)' % (progress, step+1, num_steps)
+                last_progress = progress
 
-        gradient = Rbm.zero(cur_params.visible_size, cur_params.hidden_size)
+        gradient = Rbm.zero(cur.visible_size, cur.hidden_size)
 
         for item in dataset:
             vpos = vneg = item
             for gibbs_step in range(num_gibbs_steps):
-                hneg = sample_hidden(cur_params, vneg)
-                vneg = sample_visible(cur_params, hneg)
+                hneg = cur.sample_hidden(vneg)
+                vneg = cur.sample_visible(hneg)
 
             #print '  Positive: %s' % bitstring(vpos)
             #print '  Negative: %s' % bitstring(vneg)
 
-            pos_gradient = cd_gradient(cur_params, vpos)
-            neg_gradient = cd_gradient(cur_params, vneg)
+            pos_gradient = free_energy_gradient(cur, vpos)
+            neg_gradient = free_energy_gradient(cur, vneg)
             gradient.bv += pos_gradient.bv - neg_gradient.bv
             gradient.bh += pos_gradient.bh - neg_gradient.bh
             gradient.w += pos_gradient.w - neg_gradient.w
@@ -272,34 +271,34 @@ def train_rbm(dataset,
 
         # Add weight decay term
         if weight_decay != 0:
-            gradient.bv -= weight_decay * cur_params.bv
-            gradient.bh -= weight_decay * cur_params.bh
-            gradient.w -= weight_decay * cur_params.w
+            gradient.bv -= weight_decay * cur.bv
+            gradient.bh -= weight_decay * cur.bh
+            gradient.w -= weight_decay * cur.w
 
-        #G_true = gradient_naive(cur_params, data)
+        #G_true = gradient_naive(cur_rbm, data)
         #print 'CD gradient:'
         #print G
         #print 'True gradient:'
         #print G_true
         ##G = G_true
 
-        cur_params.w += gradient.w * learning_rate
-        cur_params.bv += gradient.bv * learning_rate
-        cur_params.bh += gradient.bh * learning_rate
+        cur.w += gradient.w * learning_rate
+        cur.bv += gradient.bv * learning_rate
+        cur.bh += gradient.bh * learning_rate
 
-        #loglik = loglikelihood_naive(cur_params, data)
+        #loglik = loglikelihood_naive(cur_rbm, data)
         #print '  Log likelihood: %.2f' % loglik
         #loglikelihoods.append(loglik)
 
-    return cur_params
+    return cur
 
 
 def compute_compression_error(rbm, dataset):
     sum_mse = 0
     for item in dataset:
         item = np.asarray(item, float)
-        compressed = hidden_conditionals(rbm, item)
-        reconstructed = visible_conditionals(rbm, compressed)
+        compressed = rbm.hidden_conditionals(item)
+        reconstructed = rbm.visible_conditionals(compressed)
         mse = np.sum(np.square(reconstructed - item)) / np.prod(np.shape(item))
         sum_mse += mse
     return sum_mse / len(dataset)
@@ -309,8 +308,8 @@ def plot_reconstructions(rbm, dataset, out, shape=None):
     pdf = PdfPages(out)
     for item in dataset:
         item = np.asarray(item, dtype=float)
-        compressed = hidden_conditionals(rbm, item)
-        recon = visible_conditionals(rbm, compressed)
+        compressed = rbm.hidden_conditionals(item)
+        recon = rbm.visible_conditionals(compressed)
 
         plt.clf()
 
@@ -334,6 +333,37 @@ def plot_reconstructions(rbm, dataset, out, shape=None):
     pdf.close()
 
 
+def plot_features(rbm, dataset, out, shape=None, features_shape=None):
+    pdf = PdfPages(out)
+    for item in dataset:
+        item = np.asarray(item, dtype=float)
+        features = rbm.hidden_conditionals(item)
+        #recon = visible_conditionals(rbm, compressed)
+
+        if shape is not None:
+            item = np.reshape(item, shape)
+        if features_shape is not None:
+            features = np.reshape(features, features_shape)
+        if item.ndim == 1:
+            item = np.atleast_2d(item).T
+        if features.ndim == 1:
+            features = np.atleast_2d(features).T
+
+        plt.clf()
+
+        plt.subplot(121)
+        plt.imshow(item, vmin=0., vmax=1., interpolation='nearest', cmap='summer')
+        plt.axis('equal')
+
+        plt.subplot(122)
+        plt.imshow(features, vmin=0., vmax=1., interpolation='nearest', cmap='summer')
+        plt.axis('equal')
+
+        pdf.savefig()
+
+    pdf.close()
+
+
 class RbmTest(unittest.TestCase):
     def setUp(self):
         self.nv = 3
@@ -341,40 +371,40 @@ class RbmTest(unittest.TestCase):
         w = np.random.normal(loc=0, scale=.1, size=(self.nv, self.nh))
         bv = np.random.normal(loc=0, scale=.1, size=self.nv)
         bh = np.random.normal(loc=0, scale=.1, size=self.nh)
-        self.params = Rbm(w, bv, bh)
+        self.rbm = Rbm(w, bv, bh)
         self.v = np.random.randint(0, 2, self.nv)
         self.h = np.random.randint(0, 2, self.nh)
 
     def test_conditional(self):
         self.assertAlmostEqual(
-            hidden_conditional(self.params, self.v, 0),
-            hidden_conditional_naive(self.params, self.v, 0),
+            self.rbm.hidden_conditional(self.v, 0),
+            self.rbm.hidden_conditional_naive(self.v, 0),
             8)
 
     def test_hidden_conditionals(self):
-        c1 = [hidden_conditional(self.params, self.v, i) for i in range(self.nh)]
-        c2 = hidden_conditionals(self.params, self.v)
+        c1 = [self.rbm.hidden_conditional(self.v, i) for i in range(self.nh)]
+        c2 = self.rbm.hidden_conditionals(self.v)
         np.testing.assert_array_almost_equal(c1, c2)
 
 
     def test_visible_conditionals(self):
-        c1 = [visible_conditional(self.params, self.h, i) for i in range(self.nv)]
-        c2 = visible_conditionals(self.params, self.h)
+        c1 = [self.rbm.visible_conditional(self.h, i) for i in range(self.nv)]
+        c2 = self.rbm.visible_conditionals(self.h)
         np.testing.assert_array_almost_equal(c1, c2)
 
 
     def test_sum_likelihood(self):
         sum = 0.
-        for v in bit_product(self.params.visible_size):
-            sum += math.exp(loglikelihood_naive(self.params, v))
+        for v in bit_product(self.rbm.visible_size):
+            sum += math.exp(self.rbm.loglikelihood_naive(v))
         self.assertAlmostEqual(sum, 1.)
 
 
     def test_gradient(self):
-        L = lambda x: loglikelihood_naive(Rbm.from_vector(x, self.nv, self.nh), self.v)
-        G = gradient_naive(self.params, self.v)
+        L = lambda x: Rbm.from_vector(x, self.nv, self.nh).loglikelihood_naive(self.v)
+        G = gradient_naive(self.rbm, self.v)
 
-        GG = numdifftools.Gradient(L)(self.params.as_vector())
+        GG = numdifftools.Gradient(L)(self.rbm.as_vector())
         G_numeric = Rbm.from_vector(GG, self.nv, self.nh)
 
         np.testing.assert_array_almost_equal(G.w, G_numeric.w)
@@ -388,50 +418,50 @@ def main():
     def run_training():
         nv = 3
         nh = 2
-        params = random_rbm(nv, nh)
+        rbm = random_rbm(nv, nh)
         v = np.array((1, 0, 0))
-        L = lambda x: loglikelihood_naive(Rbm.from_vector(x, nv, nh), v)
+        L = lambda x: Rbm.from_vector(x, nv, nh).loglikelihood_naive(v)
         C = lambda x: -L(x)
 
         print 'Training data: ' + ''.join(map(str, map(int, v)))
         print 'Optimizing...'
-        xopt = scipy.optimize.fmin(C, params.as_vector())
-        opt_params = Rbm.from_vector(xopt, nv, nh)
+        xopt = scipy.optimize.fmin(C, rbm.as_vector())
+        opt_rbm = Rbm.from_vector(xopt, nv, nh)
 
-        print opt_params
-        print 'Likelihood of data:', loglikelihood_naive(opt_params, v)
-        print_table(opt_params)
+        print opt_rbm
+        print 'Likelihood of data:', opt_rbm.loglikelihood_naive(v)
+        opt_rbm.print_table()
 
     def run_training2():
         nv = 4
         nh = 1
-        params = random_rbm(nv, nh)
+        rbm = random_rbm(nv, nh)
 
         vs = [np.array([1, 0, 0, 0]),
               np.array([0, 0, 0, 1]),
               np.array([1, 0, 0, 1])]
 
-        L = lambda x: sum_loglikelihood_naive(Rbm.from_vector(x, nv, nh), vs)
+        L = lambda x: Rbm.from_vector(x, nv, nh).sum_loglikelihood_naive(vs)
         C = lambda x: -L(x)
 
-        xopt = scipy.optimize.fmin(C, params.as_vector())
-        opt_params = Rbm.from_vector(xopt, nv, nh)
+        xopt = scipy.optimize.fmin(C, rbm.as_vector())
+        opt_rbm = Rbm.from_vector(xopt, nv, nh)
 
         print 'Final parameters:'
-        print opt_params
-        print 'Log likelihood of data:', sum_loglikelihood_naive(opt_params, vs)
-        print_table(opt_params)
+        print opt_rbm
+        print 'Log likelihood of data:', opt_rbm.sum_loglikelihood_naive(vs)
+        opt_rbm.print_table()
 
     def run_gradient():
         nv = 3
         nh = 2
-        params = random_rbm(nv, nh)
+        rbm = random_rbm(nv, nh)
         v = np.array((1, 0, 0))
-        L = lambda x: loglikelihood_naive(Rbm.from_vector(x, nv, nh), v)
+        L = lambda x: Rbm.from_vector(x, nv, nh).loglikelihood_naive(v)
 
-        G = gradient_naive(params, v)
+        G = gradient_naive(rbm, v)
 
-        GG = numdifftools.Gradient(L)(params.as_vector())
+        GG = numdifftools.Gradient(L)(rbm.as_vector())
         G_numeric = Rbm.from_vector(GG, nv, nh)
 
         print '\nAnalytic gradient of weights:'
@@ -454,25 +484,25 @@ def main():
                          [0, 0, 0, 1]])
         nv = data.shape[1]
         nh = 1
-        seed_params = random_rbm(nv, nh)
+        seed_rbm = random_rbm(nv, nh)
 
-        print_table(seed_params)
-        learned_params = train_rbm(data, learning_rate=.1, num_steps=10000, seed=seed_params)
-        print_table(learned_params)
+        seed_rbm.print_table()
+        learned_rbm = train_rbm(data, learning_rate=.1, num_steps=10000, seed=seed_rbm)
+        learned_rbm.print_table()
 
-        save_rbm(learned_params, 'rbms/2x4.txt')
+        save_rbm(learned_rbm, 'rbms/2x4.txt')
 
     def run_contrastive_divergence2():
         data = np.array([[1, 0, 0, 0],
                          [0, 0, 0, 1]])
         nv = data.shape[1]
         nh = 1
-        seed_params = random_rbm(nv, nh)
+        seed_rbm = random_rbm(nv, nh)
 
-        print_table(seed_params)
-        learned_params = train_rbm(data, learning_rate=.1, num_steps=10, seed=seed_params)
-        print_table(learned_params)
-        print compute_compression_error(learned_params, data)
+        seed_rbm.print_table()
+        learned_rbm = train_rbm(data, learning_rate=.1, num_steps=10, seed=seed_rbm)
+        learned_rbm.print_table()
+        print compute_compression_error(learned_rbm, data)
 
     def run_compression():
         data = np.array([[1, 0, 0, 0],
@@ -497,7 +527,7 @@ def main():
         #data.append([i%2 for i in range(100)])
         #data.append([(i+1)%2 for i in range(100)])
         for i in range(100):
-            center = np.random.randint(3, 7, size=2)
+            center = np.random.randint(2, 8, size=2)
             image = make_block_image(center, 3, (10,10))
             dataset.append(image.flatten())
         return dataset
@@ -508,7 +538,7 @@ def main():
         nh = 50
         seed = random_rbm(nv, nh, stddev=1e-2)
 
-        rbm = train_rbm(data, learning_rate=.01, weight_decay=1e-4, num_steps=1000, seed=seed)
+        rbm = train_rbm(data, learning_rate=.01, weight_decay=1e-4, num_steps=2000, seed=seed)
         #rbm = train_rbm(data, learning_rate=.001, weight_decay=1e-4, num_steps=1000, seed=rbm)
 
         save_rbm(rbm, 'rbms/blocks.txt')
@@ -525,13 +555,21 @@ def main():
 
     def run_plot_novel_blocks():
         images = []
-        for i in range(-1, 12, 2):
-            for j in range(-1, 12, 2):
+        for i in range(2, 8):
+            for j in range(2, 8):
                 images.append(make_block_image((i,j), 3, (10,10)).flatten())
 
         rbm = load_rbm('rbms/blocks.txt')
         plot_reconstructions(rbm, images, shape=(10,10), out='out/novel_reconstruction.pdf')
 
+    def run_plot_features():
+        images = []
+        for i in range(2, 8):
+            for j in range(2, 8):
+                images.append(make_block_image((i,j), 3, (10,10)).flatten())
+
+        rbm = load_rbm('rbms/blocks.txt')
+        plot_features(rbm, images, shape=(10,10), features_shape=(10,5), out='out/novel_reconstruction.pdf')
 
     #run_gradient()
     #run_training()
@@ -541,6 +579,7 @@ def main():
     run_train_blocks()
     #run_plot_reconstructions()
     #run_plot_novel_blocks()
+    #run_plot_features()
 
 
 if __name__ == '__main__':
