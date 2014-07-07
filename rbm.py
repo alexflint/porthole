@@ -253,7 +253,7 @@ class ConvolutionalRbm(object):
 
     @classmethod
     def zero_like(cls, crbm):
-        return cls.zero_like(crbm.vshape, crbm.w.shape)
+        return cls.zero(crbm.vshape, crbm.w.shape)
 
     def as_vector(self):
         return np.hstack((self.w.flatten(), self.bv, self.bh))
@@ -327,12 +327,11 @@ class ConvolutionalRbm(object):
 
     def loglikelihood_naive(self, v):
         cond_energies = []
+        joint_energies = []
         for h in bit_product(self.hshape):
             cond_energies.append(self.energy(v, h))
-        joint_energies = []
-        for x in bit_product(self.state_size):
-            v, h = self.state_from_vector(x)
-            joint_energies.append(self.energy(v, h))
+            for vv in bit_product(self.vshape):
+                joint_energies.append(self.energy(vv, h))
         return log_sum_neg_exp(cond_energies) - log_sum_neg_exp(joint_energies)
 
     def sum_loglikelihood_naive(self, vs):
@@ -347,37 +346,44 @@ class ConvolutionalRbm(object):
             print '  %s: %.2f' % (bitstring(v), math.exp(loglik))
 
 
+def rbm_free_energy_gradient(rbm, v):
+    v = np.asarray(v, dtype=float).copy()
+    h = rbm.hidden_conditionals(v)
+    return Rbm(np.outer(v, h), v, h)
+
+
 def rbm_gradient_naive(rbm, v0):
-    G = Rbm.zero_like(rbm)
-
-    G.w = np.zeros((rbm.visible_size, rbm.hidden_size))
-    for i in range(rbm.hidden_size):
-        G.w[:, i] += rbm.hidden_conditional(v0, i) * v0
+    G = rbm_free_energy_gradient(rbm, v0)
     for v in bit_product(rbm.visible_size):
         # TODO: avoid underflow here by using log_sum_exp appropriately
+        G_v = rbm_free_energy_gradient(rbm, v)
         lik = rbm.likelihood_naive(v)
-        condps = rbm.hidden_conditionals(v)
-        G.w -= lik * np.outer(v, condps)
-
-    G.bv = np.asarray(v0).astype(float).copy()
-    for v in bit_product(rbm.visible_size):
-        # TODO: avoid underflow here by using log_sum_exp appropriately
-        G.bv -= rbm.likelihood_naive(v) * np.asarray(v).astype(float)
-
-
-    G.bh = rbm.hidden_conditionals(v0)
-    for v in bit_product(rbm.visible_size):
-        # TODO: avoid underflow here by using log_sum_exp appropriately
-        G.bh -= rbm.likelihood_naive(v) * np.asarray(rbm.hidden_conditionals(v))
-
+        G.w -= lik * G_v.w
+        G.bv -= lik * G_v.bv
+        G.bh -= lik * G_v.bh
     return G
 
 
+def crbm_free_energy_gradient(crbm, v):
+    v = np.asarray(v, float)
+    h = crbm.hidden_conditionals(v)
+    G = ConvolutionalRbm.zero_like(crbm)
+    G.w = np.array([scipy.signal.correlate2d(v, hi, mode='valid') for hi in h])
+    G.bv = v.sum()
+    G.bh = h.sum(axis=2).sum(axis=1)
+    return G
 
-def free_energy_gradient(rbm, v):
-    v = np.asarray(v, dtype=float)
-    h = rbm.hidden_conditionals(v)
-    return Rbm(np.outer(v, h), v, h)
+
+def crbm_gradient_naive(crbm, v0):
+    G = crbm_free_energy_gradient(crbm, v0)
+    for v in bit_product(crbm.vshape):
+        # TODO: avoid underflow here by using log_sum_exp appropriately
+        G_v = crbm_free_energy_gradient(crbm, v)
+        lik = crbm.likelihood_naive(v)
+        G.w -= lik * G_v.w
+        G.bv -= lik * G_v.bv
+        G.bh -= lik * G_v.bh
+    return G
 
 
 def train_rbm(dataset,
@@ -408,8 +414,8 @@ def train_rbm(dataset,
             #print '  Positive: %s' % bitstring(vpos)
             #print '  Negative: %s' % bitstring(vneg)
 
-            pos_gradient = free_energy_gradient(cur, vpos)
-            neg_gradient = free_energy_gradient(cur, vneg)
+            pos_gradient = rbm_free_energy_gradient(cur, vpos)
+            neg_gradient = rbm_free_energy_gradient(cur, vneg)
             gradient.bv += pos_gradient.bv - neg_gradient.bv
             gradient.bh += pos_gradient.bh - neg_gradient.bh
             gradient.w += pos_gradient.w - neg_gradient.w
@@ -588,11 +594,11 @@ class ConvolutionalRbmTest(unittest.TestCase):
             sum += math.exp(self.crbm.loglikelihood_naive(v))
         self.assertAlmostEqual(sum, 1.)
 
-    def _test_gradient(self):
+    def test_gradient(self):
         def L(x):
             crbm = ConvolutionalRbm.from_vector_like(x, self.crbm)
             return crbm.loglikelihood_naive(self.v)
-        G = gradient_naive_crbm(self.crbm, self.v)
+        G = crbm_gradient_naive(self.crbm, self.v)
 
         GG = numdifftools.Gradient(L)(self.crbm.as_vector())
         G_numeric = ConvolutionalRbm.from_vector_like(GG, self.crbm)
